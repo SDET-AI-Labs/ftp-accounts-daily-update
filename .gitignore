@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+
+# Build/Packaging
+build/
+dist/
+*.spec
+*.zip
+
+# App outputs
+result/
+logs/
+errors/
+
+# IDE/editor
+.vscode/
+*.code-workspace
+
+# Credentials and sensitive files
+credentials.txt
+src/credentials.txt
+
+# Tests cache
+.pytest_cache/
