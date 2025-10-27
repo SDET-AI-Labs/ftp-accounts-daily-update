@@ -36,6 +36,7 @@ def collect_latest_file_details(
     previous_day: bool = False,
     today_only: bool = False,
     skip_accounts: list[str] | None = None,
+    on_date: datetime.date | None = None,
 ):
     configs = load_multiple_configs_from_file()
     results = []
@@ -99,8 +100,8 @@ def collect_latest_file_details(
                     # Special handling: if multiple filters are provided (e.g., Inventory prefixes),
                     # return one line per prefix with its own latest file.
                     if filters and len(filters) > 1:
-                        on_date = datetime.datetime.now().date() if today_only else None
-                        per = connector.get_latest_files_per_prefix(folder_path, filters, on_date=on_date)
+                        # If an explicit on_date is provided, restrict per-prefix lookup to that date.
+                        per = connector.get_latest_files_per_prefix(folder_path, filters, on_date=on_date if today_only else None)
                         for pfx_lower, (fname, fdt) in per.items():
                             label = f"{folder_label} - {pfx_lower}"
                             if fname and fdt:
@@ -156,12 +157,13 @@ def collect_latest_file_details(
                         continue
 
                     if today_only:
-                        target_date = datetime.datetime.now().date()
+                        target_date = on_date or datetime.datetime.now().date()
                         latest_file, latest_date = connector.get_latest_file_info_on_date(
                             folder_path, target_date, name_filters=filters
                         )
                     elif previous_day:
-                        target_date = datetime.datetime.now().date()
+                        # previous_day semantics: latest strictly before today (or before on_date if provided)
+                        target_date = on_date or datetime.datetime.now().date()
                         latest_file, latest_date = connector.get_latest_file_info_before_date(
                             folder_path, target_date, name_filters=filters
                         )
@@ -322,6 +324,21 @@ def parse_args(argv: list[str] | None = None):
         help="Account names to skip (can be given multiple times). Example: --skip Wizard",
         default=None,
     )
+    parser.add_argument(
+        "--date",
+        help="Single calendar date to report for (format: YYYY-MM-DD).",
+        default=None,
+    )
+    parser.add_argument(
+        "--start-date",
+        help="Start date (inclusive) for a date range (format: YYYY-MM-DD).",
+        default=None,
+    )
+    parser.add_argument(
+        "--end-date",
+        help="End date (inclusive) for a date range (format: YYYY-MM-DD).",
+        default=None,
+    )
     return parser.parse_args(argv)
 
 
@@ -330,6 +347,39 @@ def main():
     if getattr(args, "latest", False):
         args.today_only = True
     run_started = datetime.datetime.now()
+
+    # Parse optional date/date-range arguments (ISO yyyy-mm-dd)
+    dates: list[datetime.date] | None = None
+    if args.date or args.start_date or args.end_date:
+        def _parse(d: str | None) -> datetime.date | None:
+            if not d:
+                return None
+            try:
+                return datetime.datetime.strptime(d, "%Y-%m-%d").date()
+            except Exception as exc:  # noqa: BLE001
+                print(f"Invalid date format: {d}. Expected YYYY-MM-DD.")
+                raise
+
+        if args.date:
+            single = _parse(args.date)
+            if single is None:
+                print("Invalid --date value")
+                return
+            dates = [single]
+        else:
+            start = _parse(args.start_date) or _parse(args.end_date)
+            end = _parse(args.end_date) or _parse(args.start_date)
+            if not start or not end:
+                print("Both --start-date and --end-date must be provided, or use --date for a single date.")
+                return
+            if start > end:
+                print("Start date must be on or before end date.")
+                return
+            dates = []
+            cur = start
+            while cur <= end:
+                dates.append(cur)
+                cur = cur + datetime.timedelta(days=1)
 
     # Default behavior: today-only unless explicitly overridden
     if not args.today_only and not args.previous_day:
@@ -349,6 +399,68 @@ def main():
         force=True,
     )
     logger = logging.getLogger(__name__)
+    # If dates were provided, run once per date and write per-date outputs.
+    if dates:
+        logger.info(
+            "Run started | account filter=%s | folder filter=%s | previous_day=%s | dates=%s | skip=%s",
+            args.account,
+            args.folder,
+            args.previous_day,
+            f"{dates[0]} to {dates[-1]}" if len(dates) > 1 else f"{dates[0]}",
+            args.skip,
+        )
+
+        for dt in dates:
+            logger.info("Collecting for calendar date: %s", dt)
+            rows = collect_latest_file_details(
+                account_filter=args.account,
+                folder_filter=args.folder,
+                previous_day=bool(args.previous_day),
+                today_only=not bool(args.previous_day),
+                skip_accounts=args.skip or [],
+                on_date=dt,
+            )
+
+            if not rows:
+                logger.warning("No data returned for date %s. Skipping.", dt)
+                continue
+
+            report_date = dt.strftime("%m-%d-%Y")
+            if args.output:
+                outp = Path(args.output)
+                if len(dates) > 1:
+                    result_path = outp.with_name(outp.stem + "_" + report_date + outp.suffix)
+                else:
+                    result_path = outp
+            else:
+                result_path = RESULT_DIR / f"Accounts_Daily_Update_{report_date}.xlsx"
+
+            output_path = write_results_to_excel(rows, output_path=result_path)
+            logger.info("Report for %s saved to %s", report_date, output_path)
+
+            error_keywords = ("error", "connection error")
+            error_rows = [
+                row
+                for row in rows
+                if isinstance(row.get("Latest File Date"), str)
+                and (
+                    row["Latest File Date"].lower().startswith(error_keywords)
+                    or row["Latest File Date"] == "Folder not configured"
+                )
+            ]
+
+            if error_rows:
+                error_path = write_results_to_excel(
+                    error_rows,
+                    output_path=ERROR_DIR / f"Accounts_Daily_Update_errors_{report_date}.xlsx",
+                )
+                logger.warning("Errors detected for %s; details saved to %s", report_date, error_path)
+            else:
+                logger.info("No errors detected for %s.", report_date)
+
+        print(f"Date range processing completed. Check {RESULT_DIR} and {ERROR_DIR} for outputs and logs: {log_file}")
+        return
+
     logger.info(
         "Run started | account filter=%s | folder filter=%s | previous_day=%s | today_only=%s | skip=%s",
         args.account,
@@ -364,6 +476,7 @@ def main():
         previous_day=bool(args.previous_day),
         today_only=bool(args.today_only),
         skip_accounts=args.skip or [],
+        on_date=None,
     )
     if not rows:
         print("No data found. Please verify your credentials file.")
