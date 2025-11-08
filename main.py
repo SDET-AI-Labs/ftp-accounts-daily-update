@@ -97,9 +97,9 @@ def collect_latest_file_details(
                 logger.info("Checking folder '%s' (%s) for '%s'", folder_label, folder_path, config["name"])
                 logger.info("Folder filters for '%s': %s", folder_label, filters if filters else "<none>")
                 try:
-                    # Special handling: if multiple filters are provided (e.g., Inventory prefixes),
+                    # Special handling: if filters are provided (e.g., Inventory prefixes),
                     # return one line per prefix with its own latest file.
-                    if filters and len(filters) > 1:
+                    if filters and len(filters) >= 1:
                         # If an explicit on_date is provided, restrict per-prefix lookup to that date.
                         per = connector.get_latest_files_per_prefix(folder_path, filters, on_date=on_date if today_only else None)
                         for pfx_lower, (fname, fdt) in per.items():
